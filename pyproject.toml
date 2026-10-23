@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autodl-grab"
+version = "0.1.5"
+description = "Persistent AutoDL GPU start, same-region disk clone and rental CLI"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+dependencies = ["playwright>=1.48,<2"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+autodl-grab = "autodl_grab.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+autodl_grab = ["assets/*.js", "licenses/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

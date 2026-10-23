@@ -1,0 +1,36 @@
+# Python 3.11+，UTF-8。复制为 config.toml 后逐项填写。
+# 必须使用完整实例 ID；不可使用名称、编号或 ID 前缀。
+source_id = "0123456789-abcdefgh"
+
+# 必填，人民币，建议使用字符串保存十进制精度。
+# 整实例每小时上限（不是单卡价格）；以下数值仅演示，请自行确定预算。
+max_hourly = "3.00"
+# 单个新增实例的磁盘日费用上限，不包含保留源实例的费用。
+max_disk_daily = "1.00"
+
+# 原 GPU 始终第一优先级。替代卡只有显式加入此白名单才会被使用。
+# 不自动推断 PyTorch、CUDA 扩展或训练代码的兼容性。
+alternate_gpus = [] # 例如 ["RTX 4090", "RTX 3090"]
+# 填接口的 region_sign，按优先级排列；空列表关闭其他地区新租。
+other_regions = [] # 先使用 plan 核对地区标识
+
+# 以下不填写即继承源主机规格。CPU/内存为整实例下限，显存为每卡。
+# min_vram_gb = 24
+# min_cpu = 12
+# min_memory_gb = 48
+# min_cuda = "12.1"
+# min_driver = "535.0"
+
+# 启用其他地区新租时必填：页面可准确识别的完整镜像名称/标识。
+# 新租只创建并开机，原数据不会自动迁移。
+image = ""
+# GB/GiB（页面标示 GB，按 1024^3 字节），新增扩容量，不是磁盘总容量。
+# 同区克隆继承源数据盘扩容量和系统盘容量；不自动缩容。
+rent_data_expand_gb = 0
+rent_system_expand_gb = 0
+
+poll_seconds = 15
+max_wait_seconds = 86400
+boot_timeout_seconds = 600
+clone_timeout_seconds = 3600
+max_clones = 1 # 0 禁用同区克隆；明确未创建的库存拒绝不计次数

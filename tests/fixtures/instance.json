@@ -1,0 +1,15 @@
+{
+  "uuid": "9876543210-abcdefgh",
+  "machine_id": "9876543210",
+  "region_sign": "fixture-east",
+  "gpu_name": "RTX 3090",
+  "req_gpu_amount": 2,
+  "status": "running",
+  "gpu_mode": true,
+  "system_disk_gb": 30,
+  "data_disk_gb": 50,
+  "data_expand_gb": 5,
+  "copy_data_disk_status": "copying",
+  "clone_locked": false,
+  "clone_source_uuid": "0123456789-abcdefgh"
+}
