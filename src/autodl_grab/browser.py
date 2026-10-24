@@ -213,7 +213,7 @@ class Browser:
     def diagnostic_page_path(url):
         # Do not include account-switch arguments, fragments or redirected hosts.
         path = urlparse(url).path
-        known = {"", "console", "instance", "list", "market", "login", "subAccountLogin"}
+        known = {"", "console", "instance", "list", "market", "login", "subAccountLogin", "cloneInstance"}
         return "/".join(p if p in known else "[redacted]" for p in path.split("/"))
 
     def restore_session_storage(self):
@@ -281,6 +281,31 @@ class Browser:
                 continue
             raise Pause("页面结构或确认内容变化: " + str((result or {}).get("refused", (result or {}).get("why", "未知页面返回")))[:180])
         raise Pause("页面仍未稳定")
+
+    def wait_creation_models(self, page, identifier, model, *, timeout_ms=15000):
+        # The form can be visible before its asynchronous model inventory arrives.
+        # Keep all guard refusals fatal; only a valid list missing the exact name
+        # is safe to poll. This method never changes the current selection.
+        started = time.monotonic()
+        deadline = started + timeout_ms / 1000
+        while True:
+            state = self.call(page, "__autodlClone", "page", identifier)
+            if any(item["name"] == model for item in state["models"]):
+                return state
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            page.wait_for_timeout(min(250, remaining * 1000))
+        report = self.home / "create_diagnostics.json"
+        diagnostic = {"stage": self.stage, "page_path": self.diagnostic_page_path(page.url),
+                      "target_model": model, "models": state["models"], "all": state["all"],
+                      "wait_ms": round((time.monotonic() - started) * 1000)}
+        message = f"等待 GPU 型号列表超时：目标型号「{model}」未出现"
+        try:
+            report.write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            raise Pause(f"{message}；型号诊断写入失败") from None
+        raise Pause(f"{message}；已保存型号诊断: {report}")
 
     def console_row(self, identifier, page=None):
         page = page or self.console
@@ -459,6 +484,8 @@ class Browser:
                 raise Pause("源实例已无可用克隆次数，无法打开只读主机规格预览") from None
             self.form.locator("#app > .create-wrap .select-server .machine-table").wait_for(state="visible", timeout=15000)
             self.inject(self.form, "create.js", "__autodlClone")
+            self.stage = "clone_preview_models"
+            self.wait_creation_models(self.form, source.id, raw["gpu_name"])
             self.call(self.form, "__autodlClone", "tickModel", source.id, raw["gpu_name"])
             self.inventory_preview = preview_key
         self.stage = "clone_preview_specs"
@@ -540,7 +567,8 @@ class Browser:
         if choice.kind == "rent":
             self.call(self.form, "__autodlClone", "configureRent", {"id": source.id, "image": choice.image,
                       "region": self.names[choice.host.region], "expandGb": choice.data_expand_gb})
-        page = self.call(self.form, "__autodlClone", "page", source.id)
+        self.stage = "clone_prepare_models" if choice.kind == "clone" else "rent_prepare_models"
+        page = self.wait_creation_models(self.form, source.id, choice.host.gpu)
         if page["all"] or any(m["ticked"] for m in page["models"]):
             # Real rent pages can arrive with a model preselected. Reloading may
             # keep that default, so explicitly uncheck via the labelled checkbox.

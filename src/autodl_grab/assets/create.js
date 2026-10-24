@@ -200,7 +200,10 @@
     if (boxes().length) return { why: 'a dialog is showing that this script does not know; read it with result(ID)' };
     var src = card(w, '源实例:');
     var val = src ? one(src, '.value') : null;
-    if (!val || textOf(val) !== id) return { why: 'the page does not name this instance as its source (源实例)' };
+    // The console appends " / remark" when the source has an instance remark.
+    // Read the complete leading ID; never accept an ID found inside the remark.
+    var source = val ? /^([0-9a-z]{10}-[0-9a-z]{8})(?: \/ (.+))?$/.exec(textOf(val)) : null;
+    if (!source || source[1] !== id) return { why: 'the page does not name this instance as its source (源实例)' };
     var img = card(w, '镜像:');
     var line = img ? one(img, '.value .noMachine') : null;
     if (!line || textOf(line) !== '以实例：' + id + '的系统创建新实例') return { why: 'the image line does not name this instance (镜像)' };

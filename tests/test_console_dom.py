@@ -149,9 +149,13 @@ def test_power_guard_clicks_only_exact_main_row_despite_mirrors(chromium, tmp_pa
         context.close()
 
 
-def test_inventory_specs_use_clone_preview_and_never_submit(chromium, tmp_path):
+@pytest.mark.parametrize("delayed_models", [False, True])
+def test_inventory_specs_use_clone_preview_and_never_submit(chromium, tmp_path, delayed_models):
     fixture = (Path(__file__).parent / "fixtures/clone_fixtures.js").read_text(encoding="utf-8")
-    html = "<!doctype html><meta charset='utf-8'><body><script>" + fixture + "</script><script>window.__cfx.mount({expandGb:0,need:false});</script>"
+    delay = """const group=document.querySelector('.el-checkbox-group');
+      const models=[...group.children]; group.replaceChildren();
+      setTimeout(() => group.append(...models), 400);""" if delayed_models else ""
+    html = "<!doctype html><meta charset='utf-8'><body><script>" + fixture + "</script><script>window.__cfx.mount({expandGb:0,need:false});" + delay + "</script>"
     context = chromium.new_context(viewport={"width": 1600, "height": 2600})
     requests, opened = [], []
 

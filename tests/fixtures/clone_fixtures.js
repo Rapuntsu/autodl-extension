@@ -95,6 +95,7 @@ window.__cfx = (function () {
       '<i class="el-alert__icon el-icon-warning"></i><div class="el-alert__content"><span class="el-alert__title">' +
       '克隆实例仅能在同一地区内进行，请在下方选租新实例</span></div></div>' +
       '<div class="card"><div class="instanceID label">源实例:</div><div class="value"><div class="noMachine"><span>' + esc(st.source) +
+      (st.sourceRemark !== null ? ' / ' + esc(st.sourceRemark) : '') +
       '</span></div></div></div>';
   }
   function billingHtml() {
@@ -394,7 +395,8 @@ window.__cfx = (function () {
     return quiet(function () {
       spec = spec || {};
       var gb = spec.expandGb === undefined ? 5 : spec.expandGb;
-      st = { source: spec.source || SRC, image: spec.image || SRC, billing: spec.billing || 'payg', coupon: spec.coupon || '',
+      st = { source: spec.source || SRC, sourceRemark: spec.sourceRemark === undefined ? null : spec.sourceRemark,
+             image: spec.image || SRC, billing: spec.billing || 'payg', coupon: spec.coupon || '',
              regions: spec.regions || [['测试甲区', 'testDC1', 'disabled'], ['测试乙区', 'testDC2', 'active'], ['测试丙区', 'testDC3', 'disabled']],
              zones: spec.zones || [['测试专区', 'zone1', 'disabled'], ['另一专区', 'zone2', 'disabled']],
              hosts: spec.hosts || defaultHosts(), head: spec.head || HEAD.slice(), modelNote: spec.modelNote || null,
