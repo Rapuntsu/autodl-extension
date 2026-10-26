@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import time
 import uuid
+import warnings
 
 from .errors import Pause
 
@@ -59,6 +60,20 @@ class Store:
             choice TEXT, before_ids TEXT NOT NULL, target TEXT, state TEXT NOT NULL,
             created REAL NOT NULL, quote TEXT NOT NULL);
         """)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(tasks)")}
+        with self.db:
+            for name, kind in (("wait_state", "TEXT"), ("wait_since", "REAL")):
+                if name not in columns:
+                    self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {kind}")
+            # Preserve an in-progress wait from older versions where possible.
+            for row in self.db.execute("SELECT id,detail FROM tasks WHERE phase='waiting_source' AND wait_since IS NULL").fetchall():
+                try:
+                    wait = json.loads(row["detail"])
+                    if isinstance(wait["state"], str) and type(wait["since"]) in (int, float):
+                        self.db.execute("UPDATE tasks SET wait_state=?,wait_since=? WHERE id=?",
+                                        (wait["state"], wait["since"], row["id"]))
+                except (ValueError, KeyError, TypeError):
+                    pass
 
     def close(self):
         self.db.close()
@@ -82,15 +97,18 @@ class Store:
         return [dict(row) for row in self.db.execute("SELECT * FROM tasks ORDER BY created DESC")]
 
     def update(self, task, **values):
-        allowed = {"phase", "target", "detail", "result", "candidate"}
+        allowed = {"phase", "target", "detail", "result", "candidate", "wait_state", "wait_since"}
         if not set(values) <= allowed:
             raise ValueError("Unknown task fields")
         values["updated"] = time.time()
         with self.db:
             self.db.execute(f"UPDATE tasks SET {','.join(k + '=?' for k in values)} WHERE id=?", (*values.values(), task))
         # No raw platform replies, tokens, or SSH credentials in the log.
-        with (self.home / "events.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps({"task": task, **values}, ensure_ascii=False) + "\n")
+        try:
+            with (self.home / "events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"task": task, **values}, ensure_ascii=False) + "\n")
+        except OSError:
+            warnings.warn("事件日志写入失败；任务状态已保存到 SQLite", RuntimeWarning)
 
     def intent(self, task, kind, choice, ids, quote):
         with self.db:
@@ -104,6 +122,8 @@ class Store:
         return cur.lastrowid
 
     def action_update(self, action, state, target=None):
+        if state not in {"pending", "accepted", "rejected", "aborted", "done"}:
+            raise ValueError("Unknown action state")
         with self.db:
             self.db.execute("UPDATE actions SET state=?,target=? WHERE id=?", (state, target, action))
 
@@ -112,4 +132,4 @@ class Store:
         return dict(row) if row else None
 
     def clone_count(self, task):
-        return self.db.execute("SELECT COUNT(*) FROM actions WHERE task=? AND kind='clone' AND state!='rejected'", (task,)).fetchone()[0]
+        return self.db.execute("SELECT COUNT(*) FROM actions WHERE task=? AND kind='clone' AND state NOT IN ('rejected','aborted')", (task,)).fetchone()[0]

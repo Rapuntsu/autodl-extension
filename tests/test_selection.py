@@ -55,7 +55,11 @@ def test_per_instance_hourly_cap(env):
 
 def test_disk_daily_cap(env):
     env.config.max_disk_daily = "0.03"
-    assert choose(env.config, env.backend.source, env.backend.reference, env.backend.hosts, "clone") == []
+    # A tariff estimate must not hide candidates whose actual platform quote may be discounted.
+    choice = choose(env.config, env.backend.source, env.backend.reference, env.backend.hosts, "clone")[0]
+    quote = env.backend.prepare(env.config, env.backend.source, choice)
+    with pytest.raises(Pause, match="价格超过"):
+        check_quote(env.config, choice, quote)
 
 
 def test_decimal_arithmetic(env):
@@ -85,12 +89,11 @@ def test_final_price_cap(env, field, value):
         check_quote(env.config, choice, quote)
 
 
-def test_final_price_changed_within_cap_still_pauses(env):
+def test_final_price_changed_within_cap_is_allowed(env):
     choice = choose(env.config, env.backend.source, env.backend.reference, env.backend.hosts, "clone")[0]
     quote = env.backend.prepare(env.config, env.backend.source, choice)
     quote["hourly"] = "2.10"
-    with pytest.raises(Pause, match="价格已变化"):
-        check_quote(env.config, choice, quote)
+    check_quote(env.config, choice, quote)
 
 
 @pytest.mark.parametrize("value", ["NaN", "Infinity", "-1", "wrong"])

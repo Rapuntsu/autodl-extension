@@ -26,7 +26,7 @@
 // The offline test is tests/console/clone_run.js; the mode 'offline-test' works only on its test page.
 (function (mode) {
   'use strict';
-  var VERSION = 4;
+  var VERSION = 6;
   var BRAND = 'autodl-autogpu clone-page.js';
   var TEST = mode === 'offline-test';
   var ID_SHAPE = TEST ? /^(abcd|wxyz|mnop|qrst|efgh)\d{6}-\d{4}[a-z]{4}$/ : /^[0-9a-z]{10}-[0-9a-z]{8}$/;
@@ -40,7 +40,7 @@
               '修改SSH密码', '充值', '续费', '发票', '包日', '包周', '包月', '包年', '优惠券', '代金券'];
   var HEAD = ['', '主机ID', '算力型号/显存', '空闲GPU', '每GPU分配', 'CPU型号', '硬盘', '驱动/CUDA', '价格(单卡)'];
   var COPY_KEYS = ['v', 'prepared', 'id', 'host', 'model', 'vramGb', 'gpus', 'cpu', 'memGb', 'cpuModel', 'driver', 'cuda', 'billing', 'region',
-                   'price', 'expandGb', 'daily', 'systemDiskGb', 'diskGb'];
+                   'price', 'expandGb', 'daily', 'systemDiskGb', 'diskGb', 'quoteGeneration', 'quotedHourly', 'quotedDaily', 'regionSign', 'systemExpandGb'];
   var GIB = 1073741824;
   var LIMIT_MS = 120000;
   var SKIP = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1 };
@@ -49,7 +49,11 @@
   var tickedAt = null;
   var confirmed = false;
 
-  function no(why) { return { ok: false, refused: why }; }
+  function no(why, state) {
+    return { ok: false, refused: why, pending: !!(state && state.pending),
+             code: state && state.code || 'guard_refused', notSubmitted: !confirmed,
+             summary: state && state.summary };
+  }
   function norm(s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); }
   function textOf(el) { return norm(el.textContent); }
   function ownText(el) {
@@ -131,6 +135,12 @@
     return m ? Number(m[1]) * 100 + Number(((m[2] || '') + '00').slice(0, 2)) : null;
   }
   function yuan(f) { return (f / 100).toFixed(2); }
+  function displaysMills(text, mills) {
+    var cents = fen(text);
+    // The preview is in thousandths of a yuan; the UI rounds to hundredths.
+    // At exactly half a cent either display rounding is safe: budgets use the unrounded quote.
+    return cents !== null && Math.abs(cents * 10 - mills) <= 5;
+  }
   function whole(x, min) { return typeof x === 'number' && x % 1 === 0 && x >= min && x < 100000; }
 
   function onConsole() {
@@ -253,7 +263,7 @@
   }
   // The GPU counts the page offers, and the one selected.
   function readCounts(w) {
-    var f = filterItem(w, 'GPU数量:');
+    var f = rent ? one(w, '.select-server > .gpu-num') : filterItem(w, 'GPU数量:');
     var rs = f ? radioButtons(f) : null;
     var on = rs ? rs.filter(function (r) { return r.on; }) : [];
     if (!rs || on.length !== 1 || rs.some(function (r) { return !/^\d{1,3}$/.test(r.value) || r.text !== r.value; })) {
@@ -271,10 +281,16 @@
     var ins = lab.length === 1 ? list(lab[0].querySelectorAll('input')) : [];
     var dot = lab.length === 1 ? list(lab[0].querySelectorAll('.el-radio__input')) : [];
     var sel = lab.length === 1 ? ticked(lab[0]) : null;
-    if (ins.length !== 1 || sel === null || !HOST_SHAPE.test(ins[0].value) || textOf(lab[0]) !== ins[0].value) return 'the host ID';
+    if (ins.length !== 1 || !HOST_SHAPE.test(ins[0].value) || textOf(lab[0]) !== ins[0].value) return 'the host ID';
     if (dot.length !== 1 || !dot[0].contains(ins[0])) return 'the host ID';
     var off = lab[0].classList.contains('is-disabled');
     if (off !== (ins[0].disabled === true)) return 'the host ID';
+    var visual = lab[0].classList.contains('is-checked');
+    if (lab[0].getAttribute('aria-checked') !== String(visual) || dot[0].classList.contains('is-checked') !== visual) return 'the host selection';
+    // The live site can retain native checked on a disabled, visibly unselected
+    // radio after replacing model rows. It cannot be chosen or used as selected.
+    if (sel === null && off && !visual) sel = false;
+    if (sel === null) return {why:'the selectable host radio is still changing', pending:true, code:'host_selection_pending'};
     var alias = textOf(c[1]);
     if (!alias) return HEAD[1];
     var mv = lines(c[2]);
@@ -308,7 +324,9 @@
     var mt = one(w, '.select-server .machine-table');
     var tb = mt ? list(mt.querySelectorAll('.el-table')) : [];
     if (tb.length !== 1) return { why: 'the page has no single host table (选择主机)' };
-    if (list(mt.querySelectorAll('.el-loading-mask')).some(shown)) return { why: 'the host table is loading' };
+    if (list(mt.querySelectorAll('.el-loading-mask')).some(shown)) {
+      return { why: 'the host table is loading', pending: true, code: 'host_table_loading' };
+    }
     var hw = child(tb[0], 'el-table__header-wrapper');
     var bw = child(tb[0], 'el-table__body-wrapper');
     if (!hw || !bw || list(hw.querySelectorAll('th')).map(textOf).join('\n') !== HEAD.join('\n')) {
@@ -319,7 +337,8 @@
     for (var k = 0; k < trs.length; k++) {
       var r = readHostRow(trs[k]);
       if (typeof r === 'string') return { why: 'row ' + (k + 1) + ' of the host table: cannot read ' + r };
-      if (rows.some(function (o) { return o.host === r.host; })) return { why: 'a host shows twice in the host table' };
+      if (r.why) return r;
+      if (rows.some(function (o) { return o.host === r.host; })) return { why: 'a host shows twice in the host table', code: 'duplicate_host_rows' };
       rows.push(r);
     }
     return { bw: bw, rows: rows };
@@ -356,7 +375,7 @@
   function survey(id, g, gpus, expandGb) {
     if (!whole(gpus, 1) || !whole(expandGb, 0)) return { why: 'gpus must be a whole number from 1 and expandGb a whole number from 0' };
     if (expandGb !== g.expandGb) return { why: 'the expansion given does not agree with the address (expand_size)' };
-    var m = readModels(g.w);
+    var m = rent ? {models: [{name: rent.model, ticked: true}], all: false} : readModels(g.w);
     if (m.why) return m;
     var on = m.models.filter(function (x) { return x.ticked; });
     if (m.all || on.length !== 1) {
@@ -375,8 +394,8 @@
   // GPUs and whether each is ticked, whether 全部 is ticked, and the GPU count selected.
   function page(id) {
     var g = gate(id);
-    if (g.why) return no(g.why);
-    var m = readModels(g.w);
+    if (g.why) return no(g.why, g);
+    var m = rent ? {models: [{name: rent.model, ticked: true}], all: false} : readModels(g.w);
     if (m.why) return no(m.why);
     var c = readCounts(g.w);
     if (c.why) return no(c.why);
@@ -388,7 +407,7 @@
   // The moment is kept; the final confirm has to follow within two minutes.
   function tickModel(id, model) {
     var g = gate(id);
-    if (g.why) return no(g.why);
+    if (g.why) return no(g.why, g);
     var m = readModels(g.w);
     if (m.why) return no(m.why);
     var hit = m.models.filter(function (x) { return x.name === model; });
@@ -404,7 +423,7 @@
   // Chooses the GPU count n, unless it is the one selected already.
   function pickCount(id, n) {
     var g = gate(id);
-    if (g.why) return no(g.why);
+    if (g.why) return no(g.why, g);
     var c = readCounts(g.w);
     if (c.why) return no(c.why);
     var hit = c.list.filter(function (r) { return typeof n === 'number' && r.value === String(n) && !r.off; });
@@ -422,9 +441,9 @@
   // reference row nothing is judged.
   function hosts(id, gpus, expandGb) {
     var g = gate(id);
-    if (g.why) return no(g.why);
+    if (g.why) return no(g.why, g);
     var s = survey(id, g, gpus, expandGb);
-    if (s.why) return no(s.why);
+    if (s.why) return no(s.why, s);
     var fit = [];
     var other = [];
     if (s.ref) {
@@ -451,9 +470,9 @@
   // Scrolls the host table's body to its end, which makes the page load the next rows. Answers how many rows there were.
   function loadMoreHosts(id) {
     var g = gate(id);
-    if (g.why) return no(g.why);
+    if (g.why) return no(g.why, g);
     var h = readHosts(g.w);
-    if (h.why) return no(h.why);
+    if (h.why) return no(h.why, h);
     scrollBody(h.bw, h.bw.scrollHeight);
     return { ok: true, rows: h.rows.length };
   }
@@ -461,10 +480,10 @@
   // that shows is brought into it first.
   function pickHost(id, hostId) {
     var g = gate(id);
-    if (g.why) return no(g.why);
+    if (g.why) return no(g.why, g);
     if (typeof hostId !== 'string' || !HOST_SHAPE.test(hostId)) return no('not a host ID' + (TEST ? ' of the offline test' : ''));
     var h = readHosts(g.w);
-    if (h.why) return no(h.why);
+    if (h.why) return no(h.why, h);
     var hit = h.rows.filter(function (r) { return r.host === hostId; });
     if (hit.length !== 1) return no('no row for this host among the rows loaded; load more (loadMoreHosts) and read again');
     if (hit[0].selected) return { ok: true, already: true };
@@ -487,6 +506,14 @@
     var need = dd ? list(dd.querySelectorAll('label.el-checkbox')).filter(function (l) { return textOf(l) === '需要扩容'; }) : [];
     var ins = dd ? list(dd.querySelectorAll('input.el-input__inner')) : [];
     var on = need.length === 1 ? ticked(need[0]) : null;
+    // The current site does not render the input until expansion is enabled.
+    if (on === false && ins.length === 0) {
+      var h = readHosts(w);
+      if (h.why) return h;
+      var selected = h.rows.filter(function (r) { return r.selected; });
+      if (selected.length !== 1) return {why: 'no selected host for expansion capacity'};
+      return {el:null, need:false, value:'', gb:0, now:null, max:selected[0].expandGb};
+    }
     var max = ins.length === 1 ? ins[0].getAttribute('max') : null;
     if (on === null || max === null || !/^\d{1,6}$/.test(max) || ins[0].getAttribute('placeholder') !== '容量范围:0~' + max) {
       return { why: 'the expansion of the data disk cannot be read (数据盘)' };
@@ -497,17 +524,17 @@
   }
   function expansion(id) {
     var g = gate(id);
-    if (g.why) return no(g.why);
+    if (g.why) return no(g.why, g);
     var e = readExpansion(g.w);
-    if (e.why) return no(e.why);
+    if (e.why) return no(e.why, e);
     return { ok: true, need: e.need, value: e.value, gb: e.gb, now: e.now, max: e.max };
   }
   // Focuses the expansion's input; the browser tool selects all, types the number and presses Enter.
   function focusExpansion(id) {
     var g = gate(id);
-    if (g.why) return no(g.why);
+    if (g.why) return no(g.why, g);
     var e = readExpansion(g.w);
-    if (e.why) return no(e.why);
+    if (e.why) return no(e.why, e);
     if (!e.need) return no('需要扩容 is not ticked on the page, and this script does not tick it');
     var why = interactable(e.el);
     if (why) return no('the input of the expansion ' + why);
@@ -517,6 +544,41 @@
   function validWant(x) {
     return !!x && typeof x === 'object' && typeof x.host === 'string' && HOST_SHAPE.test(x.host) && typeof x.model === 'string' &&
       x.model !== '' && whole(x.gpus, 1) && whole(x.expandGb, 0);
+  }
+  function preview(x) {
+    if (TEST && !window.__autodlQuote) return null;
+    var q = window.__autodlQuote && window.__autodlQuote.read();
+    var waiting = function(code) { return {why:'waiting for the current platform price preview', pending:true, code:code}; };
+    if (!q || q.pending) return waiting('quote_pending');
+    if (q.status === 401 || q.status === 403) return {why:'price preview requires login or permission', code:'quote_auth_failed'};
+    if (!q.status || q.status === 429 || q.status >= 500 || !q.payload) return waiting('quote_transport_pending');
+    var body = q.request, p = q.payload, d = p && p.data;
+    if (['AuthorizeFailed','Unauthorized','TokenExpired','PermissionDenied','AccessDenied','Forbidden','NoPermission','SubAccountPermissionDenied'].includes(p.code)) {
+      return {why:'price preview requires login or permission', code:'quote_auth_failed'};
+    }
+    if (['GPUNotEnough','GpuNotEnough','InsufficientGPU','MachineNoResource'].includes(p.code)) {
+      return {why:'price preview reports unavailable inventory', code:'quote_no_resource'};
+    }
+    if (q.status !== 200 || !['Success','OK','success'].includes(p.code) || !body || !d || typeof d !== 'object') {
+      return {why:'unknown price preview response', code:'quote_schema_unknown'};
+    }
+    var same = function(v) { return v.machine_id === x.host && v.num === x.gpus && v.charge_type === 'payg' && v.expand_data_disk === x.expandGb * GIB; };
+    if (!same(body) || !same(d)) return waiting('quote_selection_pending');
+    if (body.coupon_id_list && (!Array.isArray(body.coupon_id_list) || body.coupon_id_list.length) ||
+        d.prepay_expand_data_disk === true || d.prepay_expand_system_disk === true) {
+      return {why:'price preview billing differs', code:'quote_spec_mismatch'};
+    }
+    // The verified preview returns region_sign="" for some hosts. The host is bound above;
+    // the exact region is also checked on the form by Python before accepting this quote.
+    if (x.regionSign && d.region_sign && d.region_sign !== x.regionSign) return {why:'price preview region differs', code:'quote_spec_mismatch'};
+    var disk = d.data_disk_info;
+    if (!disk || !Number.isSafeInteger(d.payg_price) || d.payg_price < 0 ||
+        !Number.isSafeInteger(disk.data_disk_deal_daily_price) || disk.data_disk_deal_daily_price < 0 ||
+        !Number.isSafeInteger(d.expand_system_disk) || d.expand_system_disk < 0) {
+      return {why:'price preview amounts or disk fields changed', code:'quote_schema_unknown'};
+    }
+    return {generation:q.generation, hourly:d.payg_price, daily:disk.data_disk_deal_daily_price,
+            systemExpand:d.expand_system_disk};
   }
   // All that is about to be created, checked against what is wanted (x: host, model, gpus, expandGb) and against the
   // page itself: {why}, or the prepared copy and the button that creates.
@@ -555,32 +617,47 @@
     var fees = sum ? list(sum.children).map(function (d) {
       return ['.pay-mode', '.rmb', '.num', '.unit'].map(function (q) { var el = one(d, q); return el ? textOf(el) : ''; });
     }) : [];
-    // 0.0066 yuan a day for each GB, shown to the fen; exactly half a fen may show either way
+    var q = preview(x);
+    if (q && q.why) return q;
+    if (q && q.systemExpand !== x.systemExpandGb * GIB) return {why:'price preview system disk differs', code:'quote_spec_mismatch'};
+    // The live page is checked against its own matched preview, never a fixed disk tariff.
+    // Legacy offline fixtures without a preview retain their explicit synthetic tariff.
     var part = x.expandGb * 66;
     var low = Math.floor(part / 100);
     var daily = fees.length === 2 ? fees[0][2] : '';
-    if (fees.length !== 2 || fees[0][0] !== '日常费用：' || fees[0][1] !== '￥' || fees[0][3] !== '/日' ||
-        !(part % 100 === 50 ? daily === yuan(low) || daily === yuan(low + 1) : daily === yuan(low + (part % 100 > 50 ? 1 : 0)))) {
-      return { why: 'the daily fee shown is not that of ' + x.expandGb + ' GB; it follows a change of the expansion only after a while' };
+    if (fees.length !== 2 || fees[0][0] !== '日常费用：' || fees[0][1] !== '￥' || fees[0][3] !== '/日' || fen(daily) === null) {
+      return { why: 'the daily fee structure or unit cannot be read' };
     }
-    if (fees[1][0] !== '配置费用：' || fees[1][1] !== '￥' || fees[1][2] !== yuan(fen(r.price) * x.gpus) || fees[1][3] !== '/时') {
-      return { why: 'the config fee shown is not the price times the GPU count, per hour' };
+    var dailyMatches = q ? displaysMills(daily, q.daily) :
+      (part % 100 === 50 ? fen(daily) === low || fen(daily) === low + 1 : fen(daily) === low + (part % 100 > 50 ? 1 : 0));
+    if (!dailyMatches) {
+      return { why: 'the daily fee has not settled for the requested expansion', pending: true, code: 'disk_fee_pending',
+               summary: {expand_gb:x.expandGb, displayed_daily:daily, preview_daily:q ? (q.daily / 1000).toFixed(3) : null} };
+    }
+    if (fees[1][0] !== '配置费用：' || fees[1][1] !== '￥' || fen(fees[1][2]) === null || fees[1][3] !== '/时') {
+      return { why: 'the config fee structure or unit cannot be read' };
+    }
+    if (!(q ? displaysMills(fees[1][2], q.hourly) : fen(fees[1][2]) === fen(r.price) * x.gpus)) {
+      return { why: 'the hourly fee has not settled', pending:!!q, code:q ? 'hourly_fee_pending' : 'guard_refused' };
     }
     var ops = one(g.w, '.pay-wrap .pay .operation');
     var bs = ops ? list(ops.querySelectorAll('button')).filter(shown) : [];
     if (bs.map(textOf).join('\n') !== '取消\n创建并开机') return { why: 'the bottom of the page does not hold 取消 and 创建并开机 alone' };
     return { create: bs[1], copy: { v: 1, prepared: true, id: id, host: r.host, model: r.model, vramGb: r.vramGb, gpus: x.gpus, cpu: r.cpu,
                                     memGb: r.memGb, cpuModel: r.cpuModel, driver: r.driver, cuda: r.cuda, billing: 'payg', region: g.region,
-                                    price: r.price, expandGb: x.expandGb, daily: daily, systemDiskGb: Number(sys[1]), diskGb: r.diskGb } };
+                                    price: r.price, expandGb: x.expandGb, daily: daily, systemDiskGb: Number(sys[1]), diskGb: r.diskGb,
+                                    regionSign:x.regionSign, systemExpandGb:x.systemExpandGb, quoteGeneration:q ? q.generation : 0,
+                                    quotedHourly:q ? (q.hourly / 1000).toFixed(3) : yuan(fen(r.price) * x.gpus),
+                                    quotedDaily:q ? (q.daily / 1000).toFixed(3) : daily } };
   }
   // Read-only: checks everything and returns the prepared copy, which the final confirm takes; and age, the seconds
   // since this script ticked the model (null when it did not), of which the final confirm allows 120.
   function prepareCreate(id, x) {
     var g = gate(id);
-    if (g.why) return no(g.why);
+    if (g.why) return no(g.why, g);
     if (confirmed) return no('the final confirm was already made on this page; read what it led to with result(ID)');
     var p = prepare(id, g, x);
-    if (p.why) return no(p.why);
+    if (p.why) return no(p.why, p);
     return { ok: true, stage: 'prepared', age: tickedAt === null ? null : Math.floor((Date.now() - tickedAt) / 1000), copy: p.copy };
   }
   function validCopy(c, id) {
@@ -591,19 +668,22 @@
   // 创建并开机, once. From here on only result is of use.
   function confirmCreate(id, copy) {
     var g = gate(id);
-    if (g.why) return no(g.why);
+    if (g.why) return no(g.why, g);
     if (confirmed) return no('the final confirm was already made on this page; read what it led to with result(ID)');
     if (!validCopy(copy, id)) return no('not a prepared copy from this script for this instance (prepareCreate returns it)');
     var p = prepare(id, g, copy);
-    if (p.why) return no(p.why);
+    if (p.why) return no(p.why, p);
     for (var k = 0; k < COPY_KEYS.length; k++) {
-      if (copy[COPY_KEYS[k]] !== p.copy[COPY_KEYS[k]]) return no('the page no longer agrees with the prepared copy (' + COPY_KEYS[k] + ')');
+      if (copy[COPY_KEYS[k]] !== p.copy[COPY_KEYS[k]]) {
+        var priceChanged = ['price','daily','quoteGeneration','quotedHourly','quotedDaily'].includes(COPY_KEYS[k]);
+        return no('the page no longer agrees with the prepared copy (' + COPY_KEYS[k] + ')', {code:priceChanged ? 'quote_changed' : 'guard_refused'});
+      }
     }
     if (tickedAt === null) {
       return no('the model was not ticked by this script on this page, so the age of the host table is not known; leave and enter the page again');
     }
     if (Date.now() - tickedAt > LIMIT_MS) {
-      return no('more than two minutes have passed since the model was ticked; leave and enter the create page again');
+      return no('more than two minutes have passed since the model was ticked; leave and enter the create page again', {code:'quote_expired'});
     }
     var why = interactable(p.create);
     if (why) return no('the 创建并开机 ' + why);
@@ -635,7 +715,7 @@
   // Gives the creation up: clicks the page's 取消, which takes the console to its market page.
   function leave(id) {
     var g = gate(id);
-    if (g.why) return no(g.why);
+    if (g.why) return no(g.why, g);
     var ops = one(g.w, '.pay-wrap .pay .operation');
     var bs = ops ? list(ops.querySelectorAll('button')).filter(function (b) { return shown(b) && textOf(b) === '取消'; }) : [];
     if (bs.length !== 1) return no('no single 取消 at the bottom of the page');
@@ -667,24 +747,41 @@
   }
 
   function rentGate(id) {
-    if (location.origin !== 'https://www.autodl.com' || id !== rent.id || !form() || boxes().length) return {why: 'invalid rental page'};
+    if (modeError || (!TEST && location.origin !== 'https://www.autodl.com') || id !== rent.id || !form() || boxes().length) return {why: 'invalid rental page'};
     var w = form();
+    var path = location.pathname.split('/');
+    if (path.length !== 6 || path[1] !== 'create' || path[2] !== rent.regionSign || path[3] !== rent.host || path[5] !== 'payg') {
+      return {why: 'rental route does not name the intended host, region and payg'};
+    }
     if (card(w, '源实例:')) return {why: 'rental unexpectedly has a clone source'};
-    var image = card(w, '镜像:');
-    if (!image || !list(image.querySelectorAll('*')).some(function(e) { return textOf(e) === rent.image; })) return {why: 'rental image not selected exactly'};
+    var image = one(w, 'form.card.image');
+    var inputs = image ? list(image.querySelectorAll('input[type="text"]')).filter(shown) : [];
+    var imageName = function (value) { return norm(value).split('/').map(norm).join(' / '); };
+    if (inputs.length !== 1 || imageName(inputs[0].value) !== imageName(rent.image)) return {why: 'rental image not selected exactly'};
     var bill = card(w, '计费方式:');
     var modes = bill ? radioButtons(bill) : null;
     if (!modes || modes.filter(function(m) {return m.on;}).length !== 1 || !modes.some(function(m) {return m.on && m.value === 'payg';})) return {why: 'not payg'};
-    var region = filterItem(w, '选择地区:');
-    var regs = region ? radioButtons(region) : null;
-    if (!regs || !regs.some(function(r) {return r.on && r.text === rent.region;})) return {why: 'rental region differs'};
+    var coupon = card(w, '优惠券:');
+    var coupons = coupon ? list(coupon.querySelectorAll('input')) : [];
+    if (coupons.length !== 1 || coupons[0].value !== '') return {why: 'rental coupon selection differs'};
+    var h = readHosts(w);
+    if (h.why) return h;
+    if (h.rows.length !== 1 || h.rows[0].host !== rent.host || h.rows[0].model !== rent.model) return {why: 'rental host or model differs'};
     return {w:w, expandBytes:rent.expandGb * GIB, expandGb:rent.expandGb, region:rent.region};
   }
-  function configureRent(x) { rent = x; return {ok:true}; }
+  function configureRent(x) {
+    if (!x || !ID_SHAPE.test(x.id) || !HOST_SHAPE.test(x.host) || typeof x.image !== 'string' || !x.image ||
+        typeof x.model !== 'string' || typeof x.regionSign !== 'string' || !whole(x.expandGb,0)) return no('invalid rental configuration');
+    rent = x;
+    var g = rentGate(x.id);
+    if (g.why) return no(g.why, g);
+    tickedAt = Date.now();
+    return {ok:true};
+  }
   function rawHosts() {
     var w = form() || document;
     var h = readHosts(w);
-    if (h.why) return no(h.why);
+    if (h.why) return no(h.why, h);
     return {ok:true, rows:h.rows.map(function(r) { var x = {}; Object.keys(r).forEach(function(k) {if(k !== 'el') x[k]=r[k];}); return x; })};
   }
   return register(Object.freeze({

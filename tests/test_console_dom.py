@@ -24,7 +24,7 @@ def chromium():
         browser.close()
 
 
-def fake_console(chromium, tmp_path, *, pages=None, delay=0, mirror=False, outside=False, repeat=False):
+def fake_console(chromium, tmp_path, *, pages=None, delay=0, mirror=False, outside=False, repeat=False, compact=False):
     pages = pages if pages is not None else [[TARGET]]
     context = chromium.new_context(viewport={"width": 1600, "height": 2600})
     adapter = Browser(tmp_path)
@@ -34,7 +34,7 @@ def fake_console(chromium, tmp_path, *, pages=None, delay=0, mirror=False, outsi
     page = context.new_page()
     adapter.console = page
     calls = []
-    options = json.dumps({"delay": delay, "mirror": mirror, "outside": outside, "pageCount": len(pages)})
+    options = json.dumps({"delay": delay, "mirror": mirror, "outside": outside, "pageCount": len(pages), "compact":compact})
     bootstrap = r"""
 const options = OPTIONS;
 function mount(rows, index) {
@@ -57,7 +57,9 @@ async function load(index) {
     body:JSON.stringify({page_index:index,page_size:10})});
   const data=await result.json(); setTimeout(() => mount(data.data.list,index), options.delay);
 }
-mount([],1); load(1);
+mount([],1);
+if (options.compact) fetch('/api/v1/instance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page_size:1})}).then(()=>load(1));
+else load(1);
 """.replace("OPTIONS", options)
     html = "<!doctype html><meta charset='utf-8'><body><script>" + FIXTURE + "</script><script>" + bootstrap + "</script>"
     def serve(route):
@@ -65,6 +67,10 @@ mount([],1); load(1);
         if path == "/console/instance/list":
             route.fulfill(status=200, content_type="text/html", body=html)
         elif path == "/api/v1/instance":
+            if "page_index" not in route.request.post_data_json:
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"code":"Success", "data":{
+                    "list":[{"uuid":TARGET, "status":"running", "req_gpu_amount":1}], "total":1}}))
+                return
             index = route.request.post_data_json["page_index"]
             calls.append(index)
             rows = pages[0 if repeat else index - 1]
@@ -76,6 +82,16 @@ mount([],1); load(1);
             route.abort()
     context.route("**/*", serve)
     return adapter, page, calls, context
+
+
+def test_compact_status_response_is_not_the_main_table(chromium, tmp_path):
+    adapter, page, calls, context = fake_console(chromium, tmp_path, pages=[[TARGET,OTHER]], compact=True)
+    try:
+        assert adapter.console_row(TARGET)["id"] == TARGET
+        assert calls == [1]
+        assert set(adapter.sessions.profiles['/api/v1/instance']['body']) >= {'page_index','page_size'}
+    finally:
+        context.close()
 
 
 @pytest.mark.parametrize("options", [{"delay": 600}, {"mirror": True}, {"outside": True}])
@@ -193,5 +209,29 @@ def test_inventory_specs_use_clone_preview_and_never_submit(chromium, tmp_path, 
         with pytest.raises(Pause, match="其他地区"):
             adapter.market_host({**raw, "region_sign": "fixture-west"})
         assert len(opened) == 2
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_clone_unlock_is_positive_readonly_menu_evidence(chromium, tmp_path, enabled):
+    adapter, page, calls, context = fake_console(chromium, tmp_path)
+    original = adapter.console_row
+
+    def locate(identifier):
+        row = original(identifier)
+        page.evaluate("""enabled => {
+          for (const item of document.querySelectorAll('li.el-dropdown-menu__item')) {
+            if (item.textContent.trim()==='克隆实例新') {
+              item.textContent='克隆实例新'; item.classList.toggle('is-disabled',!enabled);
+            }
+          }
+        }""", enabled)
+        return row
+
+    adapter.console_row = locate
+    try:
+        source = Instance(TARGET, "abcd123456", "fixture-east", "RTX 0000", 1, "stopped", None)
+        assert adapter.verify_clone_unlocked(source) is enabled
     finally:
         context.close()

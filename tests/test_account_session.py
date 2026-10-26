@@ -11,7 +11,7 @@ from autodl_grab.errors import Pause
 
 def request(path="/api/v1/instance", body=None, headers=None, method="POST", origin=BASE):
     return SimpleNamespace(url=origin + path, method=method,
-                           post_data_json={"page_index": 1, "child_scope": "fixture-child"} if body is None else body,
+                           post_data_json={"page_index": 1, "page_size":10, "child_scope": "fixture-child"} if body is None else body,
                            all_headers=lambda: headers or {"authorization": "fixture-active-child-token",
                                                          "x-account-scope": "fixture-child",
                                                          "cookie": "fixture-cookie", "content-length": "60"})
@@ -25,6 +25,15 @@ def test_observed_child_headers_and_body_are_used():
     assert headers["x-account-scope"] == "fixture-child"
     assert "cookie" not in headers and "content-length" not in headers
     assert body == {"page_index": 2, "page_size": 50, "child_scope": "fixture-child"}
+
+
+def test_compact_status_request_cannot_bind_or_replace_list_profile():
+    session = RequestSession()
+    session.observe(request(body={"page_size":1}))
+    assert not session.has('/api/v1/instance')
+    session.observe(request())
+    session.observe(request(body={"page_size":1}))
+    assert session.profiles['/api/v1/instance']['body']['page_index'] == 1
 
 
 def test_read_api_replays_child_scope_in_shared_context():

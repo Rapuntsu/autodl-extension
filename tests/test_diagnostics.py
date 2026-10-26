@@ -143,7 +143,8 @@ def test_failed_navigation_preserves_original_error_when_cleanup_also_fails(tmp_
         cleanup.append("runtime")
         raise RuntimeError("cleanup-secret")
 
-    context = SimpleNamespace(on=lambda *args: None, new_page=lambda: SimpleNamespace(goto=goto))
+    context = SimpleNamespace(on=lambda *args: None, add_init_script=lambda *args: None,
+                              new_page=lambda: SimpleNamespace(goto=goto))
     browser = SimpleNamespace(new_context=lambda **kwargs: context, close=close)
     runtime = SimpleNamespace(chromium=SimpleNamespace(launch=lambda **kwargs: browser), stop=stop)
     monkeypatch.setattr(playwright, "sync_playwright", lambda: SimpleNamespace(start=lambda: runtime))

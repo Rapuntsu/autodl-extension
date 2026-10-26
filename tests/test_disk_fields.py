@@ -5,9 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from autodl_grab.browser import Browser, instance_data_base_gb, instance_data_expansion_gb, instance_system_disk_gb, parse_host, parse_instance
+from autodl_grab.browser import Browser, instance_data_base_gb, instance_data_expansion_gb, instance_system_disk_gb, parse_host, parse_instance, usable_gpu_count
 from autodl_grab.config import Config
-from autodl_grab.errors import Pause
+from autodl_grab.errors import Pause, Retryable, TransientPage
 from autodl_grab.models import Host
 
 GIB = 1024 ** 3
@@ -24,6 +24,22 @@ def actual_shape(**changes):
             "expand_data_disk_size": 100 * GIB,
             "usage_info": {"valid": False, "root_fs_total_size": 31526391808, "data_disk_total_size": 0},
             **changes}
+
+
+@pytest.mark.parametrize("state,expected", [(0,8),(1,8),(2,8),(3,0),(4,0),(5,0),(6,0)])
+def test_free_gpus_on_unrentable_hosts_are_not_candidates(state, expected):
+    raw = {"gpu_idle_num":8, "on_line":state, "max_instance_num":150, "binding_instance_num":3}
+    assert usable_gpu_count(raw) == expected
+
+
+def test_full_instance_slots_or_unknown_online_state_are_not_rentable():
+    assert usable_gpu_count({"gpu_idle_num":8, "max_instance_num":2, "binding_instance_num":2}) == 0
+    with pytest.raises(Pause, match="状态未知"):
+        usable_gpu_count({"gpu_idle_num":8, "on_line":7})
+
+
+def test_market_preview_cannot_override_fresher_ui_availability():
+    assert usable_gpu_count({"gpu_idle_num":8,"on_line":2}, fallback=0) == 0
 
 
 @pytest.mark.parametrize("expanded,total", [(0, 30), (30, 30), (60, 60), (530, 530)])
@@ -180,7 +196,8 @@ def test_market_fallback_error_also_saves_schema(tmp_path):
     assert report["fields"]["machine_id"] == "str"
 
 
-def test_market_preview_timeout_also_saves_missing_api_schema(tmp_path):
+@pytest.mark.parametrize("error", [TimeoutError("fixture-secret"), Retryable("fixture-secret"), TransientPage("fixture-secret")])
+def test_market_preview_transient_failure_remains_recoverable(tmp_path, error):
     raw_source = actual_shape()
     raw_host = {"machine_id": "0123456789", "region_sign": "fixture-east", "region_name": "测试区"}
     browser = Browser(tmp_path)
@@ -188,13 +205,11 @@ def test_market_preview_timeout_also_saves_missing_api_schema(tmp_path):
     browser.instance = lambda _: parse_instance(raw_source)
     browser.api = SimpleNamespace(machines=lambda *args: [raw_host], snapshot=lambda _: raw_source)
     browser.sessions = SimpleNamespace(has=lambda _: True)
-    browser.market_host = lambda _: (_ for _ in ()).throw(TimeoutError("fixture-secret"))
-    with pytest.raises(Pause, match="schema_diagnostics.json") as caught:
+    browser.market_host = lambda _: (_ for _ in ()).throw(error)
+    with pytest.raises(type(error)) as caught:
         browser.inventory(Config(SOURCE, "5", "2"))
-    assert isinstance(caught.value.__cause__, TimeoutError)
-    text = (tmp_path / "schema_diagnostics.json").read_text(encoding="utf-8")
-    assert json.loads(text)["context"] == "market_host"
-    assert "fixture-secret" not in text + str(caught.value)
+    assert caught.value is error
+    assert not (tmp_path / "schema_diagnostics.json").exists()
 
 
 def test_zero_initial_fields_do_not_mean_zero_capacity():

@@ -70,3 +70,27 @@ def test_nested_diagnostic_preserves_only_names_and_types():
         "disk_info": {"size": "int", "password": "str"},
         "devices": {"type": "list", "item_structure": {"gpu_alias": "str"}},
     }
+
+
+@pytest.mark.parametrize("status,expected", [("Succeed",True), ("Running",False), ("",None), ("new-status",None)])
+def test_actual_nested_clone_metadata(status, expected):
+    raw = fixture()
+    raw.pop("copy_data_disk_status", None)
+    raw.pop("clone_source_uuid", None)
+    raw.pop("clone_locked", None)
+    raw["additional_info"] = {"src_instance_uuid":"7654321098-abcdefgh",
+                              "copy_data_disk_after_clone_status":status,
+                              "clone_dst_instance":"9876543210-abcdefgh"}
+    instance = parse_instance(raw)
+    assert instance.copy_complete is expected
+    assert instance.source_id == "7654321098-abcdefgh"
+    # A historical destination never acts as a lock signal.
+    assert instance.clone_locked is None
+
+
+def test_conflicting_copy_metadata_is_not_silently_overridden():
+    raw = fixture()
+    raw["copy_data_disk_status"] = "completed"
+    raw["additional_info"] = {"copy_data_disk_after_clone_status":"Running"}
+    with pytest.raises(Pause, match="不一致"):
+        parse_instance(raw)

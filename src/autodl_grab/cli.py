@@ -9,6 +9,7 @@ from .diagnostics import diagnose_error
 from .engine import Engine
 from .errors import Pause, Retryable
 from .store import Store, profile_lock
+from . import __version__
 
 
 def output(value):
@@ -17,6 +18,7 @@ def output(value):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="autodl-grab", description="AutoDL 原实例开机、同区磁盘克隆与其他地区新租")
+    parser.add_argument("--version", action="version", version=f"autodl-grab {__version__}")
     parser.add_argument("--home", type=Path, default=Path.cwd() / ".local",
                         help="登录配置目录（默认项目 .local；同目录单进程）")
     parser.add_argument("--headed", action="store_true", help="显示浏览器以排查页面问题")
@@ -65,15 +67,20 @@ def main(argv=None):
                     output(json.loads(row["result"]))
                     return 0
             browser = Browser(home, headed=args.headed)
-            with browser:
+            if args.command == "plan":
+                with browser:
+                    browser.stage = args.command
+                    output(Engine(browser, store).plan(config))
+            else:
+                # The engine owns initial connection retries as well as later browser recovery.
+                task = task or store.new(config)
+                browser.task_id = task
                 browser.stage = args.command
-                engine = Engine(browser, store)
-                if args.command == "plan":
-                    output(engine.plan(config))
-                else:
-                    task = task or store.new(config)
-                    print(f"任务 ID: {task}", flush=True)
-                    output(engine.run(task))
+                print(f"任务 ID: {task}", flush=True)
+                try:
+                    output(Engine(browser, store).run(task))
+                finally:
+                    browser.__exit__(None, None, None)
         return 0
     except Pause as e:
         print(f"已暂停: {e}", file=sys.stderr)

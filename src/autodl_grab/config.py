@@ -46,8 +46,10 @@ class Config:
     max_clones: int = 1
 
     def __post_init__(self):
-        if not re.fullmatch(r"[a-z0-9]{10}-[a-z0-9]{8}", self.source_id):
+        if not isinstance(self.source_id, str) or not re.fullmatch(r"[a-z0-9]{10}-[a-z0-9]{8}", self.source_id):
             raise Pause("source_id 必须是完整 AutoDL 实例 ID")
+        if not isinstance(self.image, str):
+            raise Pause("image 必须为字符串")
         money(self.max_hourly)
         money(self.max_disk_daily)
         for key in ("alternate_gpus", "other_regions"):
@@ -59,7 +61,8 @@ class Config:
                 raise Pause(f"{key} 必须为正整数秒")
         for key in ("rent_data_expand_gb", "rent_system_expand_gb", "max_clones", "min_vram_gb", "min_cpu", "min_memory_gb"):
             val = getattr(self, key)
-            if val is not None and (type(val) is not int or val < 0):
+            optional = key in ("min_vram_gb", "min_cpu", "min_memory_gb")
+            if not (optional and val is None) and (type(val) is not int or val < 0):
                 raise Pause(f"{key} 必须为非负整数")
         for key in ("min_driver", "min_cuda"):
             if getattr(self, key) is not None:

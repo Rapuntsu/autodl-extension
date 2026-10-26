@@ -10,7 +10,7 @@ SOURCE = "0123456789-abcdefgh"
 
 def source_session():
     session = RequestSession()
-    session.observe(SimpleNamespace(url=BASE + "/api/v1/instance", method="POST", post_data_json={"page_index": 1, "child_selector": "fixture"},
+    session.observe(SimpleNamespace(url=BASE + "/api/v1/instance", method="POST", post_data_json={"page_index": 1, "page_size":10, "child_selector": "fixture"},
                                     all_headers=lambda: {"authorization": "fixture-child-token", "x-account-scope": "fixture-child"}))
     return session
 

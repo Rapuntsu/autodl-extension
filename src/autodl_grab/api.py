@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import re
 import json
+import math
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
@@ -134,7 +135,7 @@ class RequestSession:
         if canonical == SNAPSHOT_PATH and request.method != "GET":
             return
         profile = self.profile(request)
-        if profile and profile["method"] == "GET":
+        if profile:
             if canonical == SNAPSHOT_PATH:
                 identifier = profile["body"].get("instance_uuid")
                 if not isinstance(identifier, str) or not re.fullmatch(r"[a-z0-9]{10}-[a-z0-9]{8}", identifier):
@@ -218,6 +219,11 @@ class RequestSession:
         # Preserve the current site's filters/account context, while allowing
         # the caller to set page number and the requested inventory filters.
         parameters = {**profile["body"], **body}
+        if path == "/api/v1/instance":
+            # These are UI search filters, not account authorization/scope.
+            for key in ("uuid", "instance_uuid", "name", "keyword", "search", "machine_id"):
+                if key not in body:
+                    parameters.pop(key, None)
         for page, size in PAGING_KEYS:
             if page in profile["body"] and size in profile["body"]:
                 if page != "page_index" and "page_index" in parameters:
@@ -243,8 +249,9 @@ def retry_seconds(value):
     if value is None:
         return None
     try:
-        return max(0, float(value))
-    except ValueError:
+        seconds = float(value)
+        return max(0, seconds) if math.isfinite(seconds) else None
+    except (ValueError, TypeError):
         try:
             return max(0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds())
         except (ValueError, TypeError):
@@ -308,7 +315,7 @@ class ReadAPI:
         try:
             payload = response.json()
         except Exception:
-            raise Pause("资源查询未返回 JSON，登录或页面结构可能已变化") from None
+            raise Retryable("资源查询响应体读取或 JSON 解析暂时失败") from None
         try:
             return envelope(payload)
         except Pause as e:

@@ -34,7 +34,7 @@
 // The offline test is tests/console/run.js; the mode 'offline-test' works only on its test page.
 (function (mode) {
   'use strict';
-  var VERSION = 11;
+  var VERSION = 12;
   var BRAND = 'autodl-autogpu console.js';
   var TEST = mode === 'offline-test';
   var ID_SHAPE = TEST ? /^(abcd|wxyz|mnop|qrst|efgh)\d{6}-\d{4}[a-z]{4}$/ : /^[0-9a-z]{10}-[0-9a-z]{8}$/;
@@ -422,7 +422,10 @@
       hover(m.trigger, 'mouseenter');
     }
     if (!menuOpen(m)) return { ok: true, open: false };
-    return { ok: true, open: true, items: list(m.menu.querySelectorAll('li.el-dropdown-menu__item')).map(textOf) };
+    var items = list(m.menu.querySelectorAll('li.el-dropdown-menu__item'));
+    var cloneItems = items.filter(function (el) { return textOf(el) === CLONE.item; });
+    return { ok: true, open: true, items: items.map(textOf),
+             cloneEnabled: cloneItems.length === 1 ? interactable(cloneItems[0]) === '' : null };
   }
   function leaveMenu(id) {
     var g = gate();
@@ -566,21 +569,26 @@
   function confirm(key) {
     var c = ctxOf(key);
     if (c.why) return no(c.why);
-    if (c.op === 'timer') return no('a timer context ends with confirmTimerDialog');
-    if (c.stage === 'opened') return no('bind the dialog first (bindDialog)');
-    if (c.stage !== 'bound') return no(stageWhy(c));
-    if (c.op === 'power-off') return no('the 关机 confirm text has not been reviewed yet; read it and dismiss');
+    function refuse(why) {
+      var result = no(why);
+      result.notSubmitted = c.stage === 'opened' || c.stage === 'bound';
+      return result;
+    }
+    if (c.op === 'timer') return refuse('a timer context ends with confirmTimerDialog');
+    if (c.stage === 'opened') return refuse('bind the dialog first (bindDialog)');
+    if (c.stage !== 'bound') return refuse(stageWhy(c));
+    if (c.op === 'power-off') return refuse('the 关机 confirm text has not been reviewed yet; read it and dismiss');
     var g = gate();
-    if (g) return no(g);
+    if (g) return refuse(g);
     var why = recheckDialog(c);
-    if (why) return no(why);
-    if (!BOX[c.op].test(c.text)) return no('the dialog text does not match');
+    if (why) return refuse(why);
+    if (!BOX[c.op].test(c.text)) return refuse('the dialog text does not match');
     var b = buttonIn(c.dialog, '.el-message-box__btns', '确定');
-    if (!b) return no('no single 确定 in the dialog');
+    if (!b) return refuse('no single 确定 in the dialog');
     why = interactable(b);
-    if (why) return no('the 确定 ' + why);
+    if (why) return refuse('the 确定 ' + why);
     why = recheckRow(c);
-    if (why) return no(why);
+    if (why) return refuse(why);
     deny(visibleText(c.dialog));
     c.stage = 'attempted';
     press(b);

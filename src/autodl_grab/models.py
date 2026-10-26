@@ -2,7 +2,7 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal
 
 from .config import money, version
-from .errors import Pause
+from .errors import Pause, QuoteOverBudget
 
 
 @dataclass(frozen=True)
@@ -96,7 +96,7 @@ def choose(config, source, reference, hosts, kind):
         hourly = money(h.hourly_per_gpu) * source.count
         # Preliminary estimate only. The final, platform-displayed daily fee is authoritative.
         daily = Decimal(expansion + max(0, system - h.system_gb)) * Decimal("0.0066")
-        if hourly > money(config.max_hourly) or daily > money(config.max_disk_daily):
+        if hourly > money(config.max_hourly):
             continue
         choice = Choice(kind, h, source.count, expansion, system, str(hourly), str(daily), config.image if kind == "rent" else "")
         ranked.append(((regions.index(h.region), gpus.index(h.gpu), hourly, -h.idle, h.id), choice))
@@ -110,6 +110,4 @@ def check_quote(config, choice, quote):
     if any(quote.get(k) != v for k, v in expected.items()):
         raise Pause("提交前页面规格与候选不一致")
     if money(quote["hourly"]) > money(config.max_hourly) or money(quote["disk_daily"]) > money(config.max_disk_daily):
-        raise Pause("提交前最终价格超过配置上限")
-    if money(quote["hourly"]) != money(choice.host.hourly_per_gpu) * choice.count:
-        raise Pause("提交前价格已变化，请重新预览")
+        raise QuoteOverBudget("提交前最终价格超过配置上限")
