@@ -1,5 +1,6 @@
 """Durable intent before effects. The OS releases the advisory lock on process exit."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -79,13 +80,93 @@ class Store:
         self.db.close()
 
     def new(self, config):
-        if self.db.execute("SELECT id FROM tasks WHERE phase != 'complete' LIMIT 1").fetchone():
-            raise Pause("已有未完成任务；使用 status 和 resume，禁止重复启动")
-        task = uuid.uuid4().hex[:16]
+        active = self.active()
+        if active:
+            row = active[0]
+            prefix = f'autodl-grab --home "{self.home.resolve()}"'
+            raise Pause(f"已有未完成任务 {row['id']}（{row['phase']}）：{row['detail']}\n"
+                        f"恢复：{prefix} resume {row['id']}\n"
+                        f"取消：{prefix} cancel {row['id']}\n"
+                        f"重新开始：{prefix} restart -c config.toml")
         with self.db:
-            self.db.execute("INSERT INTO tasks(id,config,phase,created,updated) VALUES(?,?,?,?,?)",
-                            (task, json.dumps(config.snapshot()), "polling", time.time(), time.time()))
+            return self._insert(config)
+
+    def _insert(self, config):
+        task = uuid.uuid4().hex[:16]
+        now = time.time()
+        self.db.execute("INSERT INTO tasks(id,config,phase,created,updated) VALUES(?,?,?,?,?)",
+                        (task, json.dumps(config.snapshot()), "polling", now, now))
         return task
+
+    def active(self):
+        return [dict(row) for row in self.db.execute(
+            "SELECT * FROM tasks WHERE phase NOT IN ('complete','cancelled') ORDER BY created DESC")]
+
+    def _cancel_selection(self, task, force):
+        if task is not None:
+            row = self.get(task)
+        else:
+            active = self.active()
+            if len(active) > 1:
+                raise Pause("存在多个未完成任务：" + ", ".join(row['id'] for row in active)
+                            + "；请先使用 cancel <task-id> 分别处理")
+            row = active[0] if active else None
+        if row is None or row['phase'] in ('complete', 'cancelled'):
+            return row, None
+        pending = self.pending(row['id'])
+        if pending and not force:
+            prefix = f'autodl-grab --home "{self.home.resolve()}"'
+            target = pending['target'] or row['target'] or '未知'
+            raise Pause(f"任务 {row['id']} 有待核对的 {pending['kind']} 提交，目标：{target}。\n"
+                        f"恢复：{prefix} resume {row['id']}\n"
+                        "确认放弃本地跟踪时为 cancel 或 restart 添加 --force；"
+                        "平台操作及计费仍可能继续。")
+        return row, pending
+
+    def backup(self):
+        path = self.home / 'backups' / (
+            'tasks-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+            + '-' + uuid.uuid4().hex + '.sqlite3')
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(sqlite3.connect(path)) as destination:
+                self.db.backup(destination)
+        except (OSError, sqlite3.Error):
+            raise Pause("任务数据库备份失败；未取消或重新启动任务，请检查备份目录权限和磁盘空间") from None
+        return str(path.resolve())
+
+    def _cancel(self, row, pending, backup):
+        detail = "已放弃本地跟踪；平台操作及计费仍可能继续" if pending else "用户取消本地任务"
+        now = time.time()
+        self.db.execute("UPDATE tasks SET phase='cancelled',detail=?,updated=? WHERE id=?",
+                        (detail, now, row['id']))
+        return {'id': row['id'], 'phase': 'cancelled', 'backup': backup,
+                'forced': pending is not None,
+                'target': (pending['target'] if pending else None) or row['target'], 'detail': detail}
+
+    def cancel(self, task=None, *, force=False):
+        """Caller must hold profile_lock, as for other modifying operations."""
+        row, pending = self._cancel_selection(task, force)
+        if row is None:
+            return {'id': None, 'detail': '没有未完成任务'}
+        if row['phase'] in ('complete', 'cancelled'):
+            return {'id': row['id'], 'phase': row['phase'], 'detail': '任务已结束，无需取消'}
+        backup = self.backup()
+        with self.db:
+            result = self._cancel(row, pending, backup)
+        self._log_update(row['id'], phase='cancelled', detail=result['detail'])
+        return result
+
+    def restart(self, config, *, force=False):
+        """Back up before atomically cancelling and inserting; caller holds profile_lock."""
+        row, pending = self._cancel_selection(None, force)
+        backup = self.backup() if row else None
+        with self.db:
+            cancelled = self._cancel(row, pending, backup) if row else None
+            task = self._insert(config)
+        if cancelled:
+            self._log_update(row['id'], phase='cancelled', detail=cancelled['detail'])
+        return task, cancelled
 
     def get(self, task):
         row = self.db.execute("SELECT * FROM tasks WHERE id=?", (task,)).fetchone()
@@ -103,6 +184,9 @@ class Store:
         values["updated"] = time.time()
         with self.db:
             self.db.execute(f"UPDATE tasks SET {','.join(k + '=?' for k in values)} WHERE id=?", (*values.values(), task))
+        self._log_update(task, **values)
+
+    def _log_update(self, task, **values):
         # No raw platform replies, tokens, or SSH credentials in the log.
         try:
             with (self.home / "events.jsonl").open("a", encoding="utf-8") as stream:

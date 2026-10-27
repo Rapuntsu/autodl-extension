@@ -24,9 +24,14 @@ def main(argv=None):
     parser.add_argument("--headed", action="store_true", help="显示浏览器以排查页面问题")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("login").add_argument("--sub-account", action="store_true", help="直接打开 AutoDL 子账号登录入口")
-    for name in ("plan", "run"):
+    for name in ("plan", "run", "restart"):
         command = commands.add_parser(name)
         command.add_argument("-c", "--config", type=Path, required=True)
+    cancel = commands.add_parser("cancel", help="备份并取消本地任务，保留历史和登录信息")
+    cancel.add_argument("task_id", nargs="?")
+    for name in ("cancel", "restart"):
+        commands.choices[name].add_argument("--force", action="store_true",
+                                           help="放弃待核对提交的本地跟踪；平台操作及计费仍可能继续")
     commands.add_parser("status")
     commands.add_parser("resume").add_argument("task_id")
     # Suppress subparser defaults so options preceding the command survive.
@@ -49,10 +54,16 @@ def main(argv=None):
             output(result)
             return 0
         stage = "config_load"
-        config = Config.load(args.config) if args.command in ("plan", "run") else None
+        config = Config.load(args.config) if args.command in ("plan", "run", "restart") else None
         stage = "task_store"
         with profile_lock(home):
             store = Store(home)
+            if args.command == "cancel":
+                result = store.cancel(args.task_id, force=args.force)
+                output(result)
+                if result.get("forced"):
+                    print("已强制放弃本地跟踪；平台操作及计费仍可能继续。", file=sys.stderr)
+                return 0
             if args.command == "login":
                 browser = Browser(home, login=True, sub_account=args.sub_account)
                 with browser:
@@ -63,9 +74,19 @@ def main(argv=None):
             if args.command == "resume":
                 task = args.task_id
                 row = store.get(task)
+                if row["phase"] == "cancelled":
+                    raise Pause("任务已取消，不能恢复；请使用 run 或 restart 创建新任务")
                 if row["phase"] == "complete":
                     output(json.loads(row["result"]))
                     return 0
+            if args.command == "restart":
+                task, cancelled = store.restart(config, force=args.force)
+                if cancelled:
+                    output({"cancelled": cancelled, "new_task": task})
+                    if cancelled["forced"]:
+                        print("已强制放弃旧任务的本地跟踪；平台操作及计费仍可能继续。", file=sys.stderr)
+            elif args.command == "run":
+                task = store.new(config)
             browser = Browser(home, headed=args.headed)
             if args.command == "plan":
                 with browser:
@@ -73,7 +94,6 @@ def main(argv=None):
                     output(Engine(browser, store).plan(config))
             else:
                 # The engine owns initial connection retries as well as later browser recovery.
-                task = task or store.new(config)
                 browser.task_id = task
                 browser.stage = args.command
                 print(f"任务 ID: {task}", flush=True)

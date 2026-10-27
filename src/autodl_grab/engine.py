@@ -31,6 +31,8 @@ class Engine:
                 "rent": [c.snapshot() for c in choose(config, source, reference, hosts, "rent")]}
 
     def run(self, task):
+        if self.store.get(task)["phase"] == "cancelled":
+            raise Pause("任务已取消，不能恢复；请创建新任务")
         config = Config(**json.loads(self.store.get(task)["config"]))
         if self.store.get(task)["phase"] == "complete":
             return json.loads(self.store.get(task)["result"])
