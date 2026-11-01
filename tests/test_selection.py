@@ -48,6 +48,24 @@ def test_explicit_minimum_override(env):
     assert choose(env.config, env.backend.source, env.backend.reference, [host], "clone")
 
 
+def test_available_gpu_rejection_explains_all_constraints(env):
+    host = replace(env.backend.hosts[0], vram_gb=12, cpu_per_gpu=4, driver="530.1")
+    rejected = []
+    assert not choose(env.config, env.backend.source, env.backend.reference, [host], "clone", rejected=rejected)
+    assert rejected == [{"host_id": host.id, "region": host.region, "gpu": host.gpu, "idle": 4,
+                         "reasons": ["每卡显存GB 12 < 要求 24", "整实例CPU核数 8 < 要求 12",
+                                     "驱动 530.1 < 要求 535.1"]}]
+
+
+def test_diagnostics_do_not_change_selection(env):
+    rejected = []
+    hosts = [*env.backend.hosts, replace(env.backend.hosts[0], id="1111111111", idle=0)]
+    args = (env.config, env.backend.source, env.backend.reference, hosts, "clone")
+    assert choose(*args, rejected=rejected) == choose(*args)
+    assert len(rejected) == 1
+    assert rejected[0]["reasons"] == ["可用卡数 0 < 要求 2"]
+
+
 def test_per_instance_hourly_cap(env):
     env.config.max_hourly = "1.99"
     assert choose(env.config, env.backend.source, env.backend.reference, env.backend.hosts, "clone") == []

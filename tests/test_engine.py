@@ -18,6 +18,36 @@ def test_start_source(env):
     assert env.backend.submits == ["start"]
 
 
+def test_polling_explains_available_cards_filtered_by_requirements(env):
+    env.config.other_regions = []
+    env.backend.hosts = [replace(env.backend.hosts[0], vram_gb=12)]
+    messages = []
+    env.engine.emit = messages.append
+    assert env.engine.round(env.task, env.config) is None
+    row = env.store.get(env.task)
+    assert row["phase"] == "polling"
+    assert "每卡显存GB 12 < 要求 24" in row["detail"]
+    assert "可用4卡" in row["detail"]
+    assert row["detail"] in messages
+    assert not env.backend.submits
+
+
+def test_polling_explains_clone_limit(env):
+    env.config.max_clones = 0
+    env.config.other_regions = []
+    env.engine.round(env.task, env.config)
+    assert "任务克隆次数已达上限 0" in env.store.get(env.task)["detail"]
+    assert not env.backend.submits
+
+
+def test_plan_includes_rejection_details_without_submitting(env):
+    env.backend.hosts = [replace(env.backend.hosts[0], driver="530.1")]
+    plan = env.engine.plan(env.config)
+    assert plan["clone"] == []
+    assert plan["rejected"]["clone"][0]["reasons"] == ["驱动 530.1 < 要求 535.1"]
+    assert not env.backend.prepares and not env.backend.submits
+
+
 def test_already_running(env):
     env.backend.source.state, env.backend.source.gpu_mode = "running", True
     assert env.engine.run(env.task)["kind"] == "start"

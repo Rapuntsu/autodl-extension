@@ -75,7 +75,7 @@ class Choice:
         return cls(**{**data, "host": Host(**data["host"])})
 
 
-def choose(config, source, reference, hosts, kind):
+def choose(config, source, reference, hosts, kind, *, rejected=None):
     req = Requirements.inherit(config, source, reference)
     gpus = list(dict.fromkeys([source.gpu, *config.alternate_gpus]))
     regions = [source.region] if kind == "clone" else [r for r in config.other_regions if r != source.region]
@@ -83,21 +83,34 @@ def choose(config, source, reference, hosts, kind):
     system = source.system_gb if kind == "clone" else 30 + config.rent_system_expand_gb
     ranked = []
     for h in hosts:
-        if h.region not in regions or h.gpu not in gpus or h.id == source.host_id or h.idle < source.count:
+        # Ignore hosts outside this strategy, but explain every in-scope rejection.
+        if h.region not in regions or h.gpu not in gpus or h.id == source.host_id:
             continue
-        if h.vram_gb < req.vram or h.cpu_per_gpu * source.count < req.cpu or h.memory_per_gpu_gb * source.count < req.memory:
-            continue
-        if version(h.driver) < version(req.driver) or version(h.cuda) < version(req.cuda):
-            continue
-        if h.max_data_expand_gb < expansion or h.system_gb + h.max_system_expand_gb < system:
-            continue
+        reasons = []
+        for label, actual, minimum in (
+            ("可用卡数", h.idle, source.count), ("每卡显存GB", h.vram_gb, req.vram),
+            ("整实例CPU核数", h.cpu_per_gpu * source.count, req.cpu),
+            ("整实例内存GB", h.memory_per_gpu_gb * source.count, req.memory),
+            ("数据盘可扩容GB", h.max_data_expand_gb, expansion),
+            ("系统盘容量GB", h.system_gb + h.max_system_expand_gb, system),
+        ):
+            if actual < minimum:
+                reasons.append(f"{label} {actual} < 要求 {minimum}")
+        for label, actual, minimum in (("驱动", h.driver, req.driver), ("CUDA", h.cuda, req.cuda)):
+            if version(actual) < version(minimum):
+                reasons.append(f"{label} {actual} < 要求 {minimum}")
         if kind == "clone" and h.data_gb + expansion < source.data_gb + source.data_expand_gb:
-            continue
+            reasons.append(f"数据盘总容量GB {h.data_gb + expansion} < 要求 {source.data_gb + source.data_expand_gb}")
         hourly = money(h.hourly_per_gpu) * source.count
+        if hourly > money(config.max_hourly):
+            reasons.append(f"整实例时价 {hourly} > 上限 {config.max_hourly}")
+        if reasons:
+            if rejected is not None:
+                rejected.append({"host_id": h.id, "region": h.region, "gpu": h.gpu,
+                                 "idle": h.idle, "reasons": reasons})
+            continue
         # Preliminary estimate only. The final, platform-displayed daily fee is authoritative.
         daily = Decimal(expansion + max(0, system - h.system_gb)) * Decimal("0.0066")
-        if hourly > money(config.max_hourly):
-            continue
         choice = Choice(kind, h, source.count, expansion, system, str(hourly), str(daily), config.image if kind == "rent" else "")
         ranked.append(((regions.index(h.region), gpus.index(h.gpu), hourly, -h.idle, h.id), choice))
     return [item[1] for item in sorted(ranked, key=lambda item: item[0])]

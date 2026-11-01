@@ -26,9 +26,11 @@ class Engine:
 
     def plan(self, config):
         source, reference, hosts = self.backend.inventory(config)
+        rejected = {"clone": [], "rent": []}
         return {"source": vars(source), "reference": vars(reference),
-                "clone": [c.snapshot() for c in choose(config, source, reference, hosts, "clone")],
-                "rent": [c.snapshot() for c in choose(config, source, reference, hosts, "rent")]}
+                "clone": [c.snapshot() for c in choose(config, source, reference, hosts, "clone", rejected=rejected["clone"])],
+                "rent": [c.snapshot() for c in choose(config, source, reference, hosts, "rent", rejected=rejected["rent"])],
+                "rejected": rejected}
 
     def run(self, task):
         if self.store.get(task)["phase"] == "cancelled":
@@ -115,12 +117,16 @@ class Engine:
         if self.backend.can_start(source):
             return self.start(task, config, source)
         source, reference, hosts = self.backend.inventory(config)
-        clones = choose(config, source, reference, hosts, "clone") if self.store.clone_count(task) < config.max_clones else []
-        rents = choose(config, source, reference, hosts, "rent")
+        rejected = []
+        clone_allowed = self.store.clone_count(task) < config.max_clones
+        clones = choose(config, source, reference, hosts, "clone", rejected=rejected) if clone_allowed else []
+        rents = choose(config, source, reference, hosts, "rent", rejected=rejected)
+        outcomes = []
         exhausted = False
         for choice in [*clones, *rents]:
             key = (choice.kind, choice.host.id)
             if self.cooldowns.get(key, 0) > self.now():
+                outcomes.append("候选冷却中")
                 continue
             if exhausted and choice.kind == "clone":
                 continue
@@ -138,18 +144,22 @@ class Engine:
                 if choice.kind != "clone":
                     raise Pause("新租页面返回未知克隆状态")
                 exhausted = True
+                outcomes.append("平台今日克隆次数已用完")
                 continue
             except NoResource:
+                outcomes.append("候选准备时平台报告资源不足")
                 self.emit("候选页面已无足够资源，继续核对下一候选")
                 continue
             except CandidateRetry:
                 self.cooldowns[key] = self.now() + 300
+                outcomes.append("候选准备失败，冷却300秒")
                 self.emit("候选准备失败，冷却 300 秒，继续检查其他候选")
                 continue
             try:
                 check_quote(config, choice, quote)
             except QuoteOverBudget:
                 self.cooldowns[key] = self.now() + 300
+                outcomes.append("最终报价超预算，冷却300秒")
                 self.emit("候选最终报价超预算，冷却后重新核对")
                 continue
             # Source inventory can change while the form is being prepared.
@@ -170,6 +180,7 @@ class Engine:
                 raise
             except NoResource:
                 self.store.action_update(action, "rejected")
+                outcomes.append("提交时平台报告资源不足")
                 continue
             except Pause:
                 # An explicit unknown/auth/balance result requires review even
@@ -185,8 +196,21 @@ class Engine:
                 self.store.action_update(action, "accepted", target)
                 self.store.update(task, target=target, phase="monitoring")
             return self.reconcile(task, config, self.store.pending(task))
-        detail = "本轮无可用资源" if not self.cooldowns else f"本轮无可用资源；{len(self.cooldowns)} 个候选冷却中"
+        notes = list(dict.fromkeys(outcomes))
+        if not clone_allowed:
+            notes.append(f"任务克隆次数已达上限 {config.max_clones}")
+        if not config.other_regions:
+            notes.append("其他地区新租未启用")
+        # Show the closest available hosts first. Keep console and persisted detail bounded;
+        # plan exposes the complete rejection list for further inspection.
+        closest = sorted(rejected, key=lambda h: (h["idle"] < source.count, len(h["reasons"]), h["host_id"]))[:3]
+        for h in closest:
+            notes.append(f"{h['gpu']}（可用{h['idle']}卡）：" + "、".join(h["reasons"]))
+        if not clones and not rents and not rejected and clone_allowed:
+            notes.append("库存中无同区白名单GPU的其他主机或已配置地区的新租主机")
+        detail = "本轮无可用资源" + ("；" + "；".join(notes) if notes else "")
         self.store.update(task, phase="polling", detail=detail)
+        self.emit(detail)
         return None
 
     def start(self, task, config, source):
